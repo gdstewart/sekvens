@@ -6,10 +6,7 @@ import { create } from "domain";
 
 const sweepLength = 1;
 
-const createOscillator = (
-  context: AudioContext,
-  freq: number
-): [OscillatorNode, GainNode] => {
+const createFlute = (context: AudioContext, freq: number): (() => void) => {
   const oscillator = context.createOscillator();
   oscillator.type = "sine";
   oscillator.frequency.setValueAtTime(freq, context.currentTime);
@@ -17,9 +14,74 @@ const createOscillator = (
   let sweepEnv = context.createGain();
   oscillator.connect(sweepEnv);
   sweepEnv.connect(context.destination);
+  sweepEnv.gain.setValueAtTime(0.0000001, context.currentTime);
+  const startCompletionTime = context.currentTime + 0.1;
+  sweepEnv.gain.exponentialRampToValueAtTime(1, startCompletionTime);
   oscillator.start();
 
-  return [oscillator, sweepEnv];
+  return () => {
+    sweepEnv.gain.cancelScheduledValues(context.currentTime);
+    sweepEnv.gain.setValueAtTime(sweepEnv.gain.value, context.currentTime);
+    sweepEnv.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 1);
+  };
+};
+
+const createWhiteNoise = (context: AudioContext) => {
+  const bufferSize = 4 * context.sampleRate;
+  const noiseBuffer = context.createBuffer(1, bufferSize, context.sampleRate);
+  const output = noiseBuffer.getChannelData(0);
+  for (var i = 0; i < bufferSize; i++) {
+    output[i] = Math.random() * 2 - 1;
+  }
+
+  var whiteNoise = context.createBufferSource();
+  whiteNoise.buffer = noiseBuffer;
+  whiteNoise.loop = true;
+  return whiteNoise;
+};
+
+const createPad = (context: AudioContext, freq: number): (() => void) => {
+  const squareOscillator = context.createOscillator();
+  squareOscillator.frequency.value = freq;
+  squareOscillator.type = "sawtooth";
+
+  const triangleOscillator = context.createOscillator();
+  triangleOscillator.frequency.value = freq - freq / 700;
+  triangleOscillator.type = "triangle";
+
+  const filter = context.createBiquadFilter();
+  filter.type = "lowshelf";
+  filter.frequency.value = freq * 1.5;
+
+  const whiteNoise = createWhiteNoise(context);
+
+  const whiteNoiseGain = context.createGain();
+  whiteNoiseGain.gain.value = 0.1;
+  whiteNoise.connect(whiteNoiseGain);
+
+  [squareOscillator, triangleOscillator, whiteNoiseGain].forEach(o =>
+    o.connect(filter)
+  );
+
+  const gain = context.createGain();
+
+  filter.connect(gain);
+
+  gain.connect(context.destination);
+
+  const startCompletionTime = context.currentTime + 0.1;
+  gain.gain.setValueAtTime(0.00001, context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(1, startCompletionTime);
+
+  [squareOscillator, triangleOscillator, whiteNoise].forEach(o => o.start());
+  return () => {
+    gain.gain.cancelScheduledValues(context.currentTime);
+    gain.gain.setValueAtTime(gain.gain.value, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 1);
+    [squareOscillator, triangleOscillator, whiteNoise].forEach(o =>
+      o.stop(context.currentTime + 1)
+    );
+  };
 };
 
 const noteToFreq = {
@@ -31,7 +93,7 @@ const noteToFreq = {
   h: 698.46
 };
 
-let oscillators: { [key: string]: Array<[OscillatorNode, GainNode]> } = {};
+let oscillators: { [key: string]: Array<() => void> } = {};
 const isKey = (key: string): key is keyof typeof noteToFreq =>
   key in noteToFreq;
 
@@ -48,28 +110,17 @@ const audio = () => {
     if (oscillators[key].length) {
       return;
     }
-    const [oscillator, sweepEnv] = createOscillator(context, noteToFreq[key]);
-
-    sweepEnv.gain.cancelScheduledValues(context.currentTime);
-    sweepEnv.gain.setValueAtTime(sweepEnv.gain.value, context.currentTime);
-    sweepEnv.gain.exponentialRampToValueAtTime(1, context.currentTime + 0.1);
-
-    oscillators[key].unshift([oscillator, sweepEnv]);
+    const stop = createPad(context, noteToFreq[key]);
+    oscillators[key].unshift(stop);
   });
 
   const clearKey = (key: string) => {
     if (isKey(key)) {
-      const pair = oscillators[key].pop();
-      if (!pair) {
+      const stop = oscillators[key].pop();
+      if (!stop) {
         return;
       }
-      const [_, sweepEnv] = pair;
-      sweepEnv.gain.cancelScheduledValues(context.currentTime);
-      sweepEnv.gain.setValueAtTime(sweepEnv.gain.value, context.currentTime);
-      sweepEnv.gain.exponentialRampToValueAtTime(
-        0.0001,
-        context.currentTime + 1
-      );
+      stop();
     }
   };
 
